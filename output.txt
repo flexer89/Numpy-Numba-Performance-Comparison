@@ -1,0 +1,43 @@
+Dostępne urządzenia CUDA:
+  0: NVIDIA GeForce RTX 2070 SUPER
+
+Uruchamianie benchmarku dla: mandelbrot
+
+--- Benchmark Zbioru Mandelbrota ---
+(max_iter = 100)
+Rozdzielczość   | NumPy CPU (ms)     | Numba CPU (ms)     | Numba GPU (ms)       
+----------------------------------------------------------------------------------------------------
+500x500         | 92.3840            | 14.9744            | 2.2465               
+1000x1000       | 425.9445           | 58.9605            | 4.7986               
+2000x2000       | 1918.0471          | 237.4027           | 26.7021              
+4000x4000       | 8512.7585          | 957.0664           | 65.0070              
+6000x6000       | 19937.6965         | 2148.7826          | 153.7686             
+8000x8000       | 36007.5226         | 3741.8975          | 254.3510             
+----------------------------------------------------------------------------------------------------
+
+INFO: Metody uwzględnione w analizie i na wykresach (gpu_kernel pominięty): numpy_cpu, numba_cpu, gpu_total
+Rozmiar         |   NumbaCPU/NumPy   |  GPU Total/NumPy   | GPU Total/NumbaCPU
+------------------------------------------------------------------------------
+500x500         |       6.17x        |       41.12x       |       6.67x       
+1000x1000       |       7.22x        |       88.76x       |       12.29x      
+2000x2000       |       8.08x        |       71.83x       |       8.89x       
+4000x4000       |       8.89x        |      130.95x       |       14.72x      
+6000x6000       |       9.28x        |      129.66x       |       13.97x      
+8000x8000       |       9.62x        |      141.57x       |       14.71x      
+------------------------------------------------------------------------------
+
+--- Generowanie Wykresów (bez gpu_kernel) ---
+Wykresy zostaną zapisane w katalogu: plots
+
+--- Generowanie Wykresu Czasu (Bez gpu_kernel, Skala Log) ---
+Zapisano wykres czasu (bez gpu_kernel, log): plots/benchmark_performance_no_kernel_log.png
+
+--- Generowanie Wykresu Przyspieszenia (Bez gpu_kernel, Słupkowy z Wartościami) ---
+Zapisano wykres przyspieszenia (bez gpu_kernel): plots/benchmark_speedup_no_kernel.png
+
+--- Generowanie Wykresu Czasu (Bez gpu_kernel, Skala Liniowa) ---
+Zapisano wykres czasu (bez gpu_kernel, lin): plots/benchmark_performance_no_kernel_linear.png
+
+Generowanie wykresów zakończone.
+
+Zakończono benchmark.

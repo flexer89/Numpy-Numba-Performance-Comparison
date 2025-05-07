@@ -14,13 +14,18 @@ try:
     from mandelbrot import (
         mandelbrot_numpy,
         mandelbrot_numba_cpu,
-        mandelbrot_cuda_kernel
+        mandelbrot_cuda_kernel,
+        mandelbrot_numba_gpu
     )
 except ImportError as e:
     print(f"Błąd importu: {e}")
     print("Upewnij się, że plik mandelbrot.py znajduje się w tym samym katalogu.")
     sys.exit(1)
+    
+import warnings
 
+from numba.core.errors import NumbaPerformanceWarning
+warnings.filterwarnings('ignore', category=NumbaPerformanceWarning)
 
 def time_func(func, *args, reps=5, warmup=1):
     for _ in range(warmup):
@@ -46,17 +51,18 @@ def time_gpu_kernel(kernel_func, blockspergrid, threadsperblock, args_tuple, rep
     return (end_time - start_time) / reps * 1000
 
 
-def benchmark_mandelbrot(sizes, max_iter=100, reps=5, warmup=1):
-    results = {}
-    print("\n--- Benchmark Zbioru Mandelbrota ---")
-    print(f"(max_iter = {max_iter})")
-    print(f"{'Rozdzielczość':<15} | {'NumPy CPU (ms)':<18} | {'Numba CPU (ms)':<18} | {'Numba GPU Kernel (ms)':<22} | {'Numba GPU Total (ms)':<21}")
-    print("-" * 100)
+def benchmark_mandelbrot(sizes, max_iter=100, reps=5, warmup=1, gpu_warmup=True):
 
     x_min, x_max = -2.0, 1.0
     y_min, y_max = -1.5, 1.5
 
     gpu_available = cuda.is_available()
+
+    results = {}
+    print("\n--- Benchmark Zbioru Mandelbrota ---")
+    print(f"(max_iter = {max_iter})")
+    print(f"{'Rozdzielczość':<15} | {'NumPy CPU (ms)':<18} | {'Numba CPU (ms)':<18} | {'Numba GPU (ms)':<21}")
+    print("-" * 100)
 
     for width in sizes:
         height = int(width * (y_max - y_min) / (x_max - x_min))
@@ -81,61 +87,33 @@ def benchmark_mandelbrot(sizes, max_iter=100, reps=5, warmup=1):
         try:
             t_numba_cpu = time_func(mandelbrot_numba_cpu, width, height, x_min, x_max, y_min, y_max, max_iter, reps=reps, warmup=warmup)
             results[res_str]['numba_cpu'] = t_numba_cpu
-            print(f"{t_numba_cpu:<18.4f} | ", end="", flush=True)
-            # Sprawdzenie poprawności (opcjonalne, tylko raz)
-            # img_numba_cpu = mandelbrot_numba_cpu(width, height, x_min, x_max, y_min, y_max, max_iter)
-            # if 'img_np' in locals():
-            #      assert np.array_equal(img_np, img_numba_cpu)
+            print(f"{t_numba_cpu:<18.4f}", end="", flush=True)
         except Exception as e:
-            print(f"{'Błąd':<18} | ", end="", flush=True)
+            print(f"{'Błąd':<0} | ", end="", flush=True)
             results[res_str]['numba_cpu'] = float('inf')
             print(f"  (Błąd Numba CPU: {e})")
 
         # 3. Numba GPU
         if gpu_available:
             try:
-                threadsperblock_gpu = (16, 16)
-                blockspergrid_x = math.ceil(image_host_ref.shape[1] / threadsperblock_gpu[1])
-                blockspergrid_y = math.ceil(image_host_ref.shape[0] / threadsperblock_gpu[0])
-                blockspergrid_gpu = (blockspergrid_x, blockspergrid_y)
+                t_numba_gpu_total = time_func(mandelbrot_numba_gpu,
+                                                width, height,
+                                                x_min, x_max,
+                                                y_min, y_max,
+                                                max_iter,
+                                                reps=reps, warmup=warmup) 
 
-                start_total = time.perf_counter()
-                image_device = cuda.to_device(image_host_ref)
-                cuda.synchronize()
-                transfer_done = time.perf_counter()
+                results[res_str]['gpu_total'] = t_numba_gpu_total
+                print(f" | {t_numba_gpu_total:<21.4f}") 
 
-                kernel_args = (x_min, x_max, y_min, y_max, image_device, max_iter)
-
-                mandelbrot_cuda_kernel[blockspergrid_gpu, threadsperblock_gpu](*kernel_args)
-                cuda.synchronize()
-                kernel_done = time.perf_counter()
-
-                image_res_gpu = image_device.copy_to_host()
-                cuda.synchronize()
-                copy_back_done = time.perf_counter()
-                end_total = copy_back_done
-
-                t_gpu_total = (end_total - start_total) * 1000
-                t_gpu_kernel = time_gpu_kernel(mandelbrot_cuda_kernel,
-                                               blockspergrid_gpu, threadsperblock_gpu,
-                                               kernel_args,
-                                               reps=reps, warmup=warmup)
-
-                results[res_str]['gpu_kernel'] = t_gpu_kernel
-                results[res_str]['gpu_total'] = t_gpu_total
-                print(f"{t_gpu_kernel:<22.4f} | ", end="", flush=True)
-                print(f"{t_gpu_total:<21.4f}")
-
-                del image_device
             except Exception as e:
+
                 print(f"{'Błąd GPU':<22} | {'Błąd GPU':<21}")
-                results[res_str]['gpu_kernel'] = float('inf')
                 results[res_str]['gpu_total'] = float('inf')
-                print(f"  (Błąd Numba GPU: {e})")
+                print(f"   (Błąd Numba GPU: {e})")
         else:
-             print(f"{'Brak GPU':<22} | {'Brak GPU':<21}")
-             results[res_str]['gpu_kernel'] = float('inf')
-             results[res_str]['gpu_total'] = float('inf')
+            print(f"{'Brak GPU':<22} | {'Brak GPU':<21}")
+            results[res_str]['gpu_total'] = float('inf')
 
     print("-" * 100)
     return results
@@ -150,8 +128,9 @@ def print_speedups(results, baseline_key='numpy_cpu'):
         return
 
     try:
+        
         first_size_key = next(iter(results))
-        methods = [k for k in results[first_size_key].keys() if k != baseline_key]
+        methods = [k for k in results[first_size_key].keys() if k != baseline_key and k != 'gpu_kernel']
         if baseline_key not in results[first_size_key]:
              print(f"Błąd: Klucz bazowy '{baseline_key}' nie znaleziony w wynikach.")
              potential_baselines = ['numba_cpu', 'numpy_cpu']
@@ -160,8 +139,7 @@ def print_speedups(results, baseline_key='numpy_cpu'):
                   if pb in results[first_size_key]:
                        baseline_key = pb
                        print(f"Używam '{baseline_key}' jako nowego baseline.")
-                       methods = [k for k in results[first_size_key].keys() if k != baseline_key]
-                       break
+                       methods = [k for k in results[first_size_key].keys() if k != baseline_key and k != 'gpu_kernel']
              if old_baseline == baseline_key:
                   print("Nie można kontynuować bez poprawnego baseline.")
                   return
@@ -194,6 +172,288 @@ def print_speedups(results, baseline_key='numpy_cpu'):
         print(" | ".join(speedup_values))
 
     print("-" * len(header))
+
+
+def print_and_plot_detailed_results(results, output_dir='plots', algorithm_name='benchmark', plot_enabled=True):
+
+    def get_width(size_str):
+        try:
+             return int(str(size_str).split('x')[0])
+        except (ValueError, IndexError, AttributeError):
+             print(f"Ostrzeżenie: Nie można sparsować szerokości z klucza '{size_str}'. Używanie wartości 0 do sortowania.")
+             return 0
+    try:
+        valid_size_keys = [k for k in results.keys() if isinstance(k, str) and 'x' in k]
+        if not valid_size_keys:
+            raise ValueError("Brak kluczy w formacie 'WxH' w wynikach.")
+        sizes = sorted(valid_size_keys, key=get_width)
+    except ValueError as e:
+         print(f"Krytyczny błąd: Nie można posortować rozmiarów. Sprawdź format kluczy w 'results'. Błąd: {e}")
+         raise
+    except Exception as e:
+         print(f"Krytyczny błąd podczas sortowania rozmiarów: {e}")
+         raise
+
+    if not sizes:
+        print("Krytyczny błąd: Brak poprawnych rozmiarów w wynikach po filtrowaniu.")
+        raise ValueError("Brak rozmiarów w wynikach.")
+
+    first_size_key = sizes[0]
+    if first_size_key not in results or not isinstance(results[first_size_key], dict):
+         print(f"Krytyczny błąd: Dane dla rozmiaru '{first_size_key}' są nieprawidłowe lub brak ich.")
+         raise KeyError(f"Nieprawidłowe lub brakujące dane dla klucza rozmiaru '{first_size_key}'.")
+
+    all_available_methods_in_first = list(results[first_size_key].keys())
+    if not all_available_methods_in_first:
+        print(f"Krytyczny błąd: Brak metod zarejestrowanych dla rozmiaru '{first_size_key}'.")
+        raise ValueError("Brak metod w wynikach.")
+
+    methods_to_process = [m for m in all_available_methods_in_first if m != 'gpu_kernel']
+
+    if not methods_to_process:
+        print("Krytyczny błąd: Brak metod do przetworzenia po odfiltrowaniu 'gpu_kernel'.")
+        raise ValueError("Brak metod (innych niż gpu_kernel) do analizy.")
+
+    print(f"\nINFO: Metody uwzględnione w analizie i na wykresach (gpu_kernel pominięty): {', '.join(methods_to_process)}")
+
+    comparisons_to_make = [
+        ('numba_cpu', 'numpy_cpu', 'NumbaCPU/NumPy'),
+        ('gpu_total', 'numpy_cpu', 'GPU Total/NumPy'),
+        ('gpu_total', 'numba_cpu', 'GPU Total/NumbaCPU'),
+    ]
+
+    valid_comparisons = [
+        c for c in comparisons_to_make
+        if c[0] in methods_to_process and c[1] in methods_to_process
+    ]
+
+    if valid_comparisons:
+        column_width = 18
+        header_parts = [f"{'Rozmiar':<15}"] + [f"{c[2]:^{column_width}}" for c in valid_comparisons]
+        header = " | ".join(header_parts)
+        print(header)
+        print("-" * len(header))
+        for size in sizes:
+            if size not in results:
+                print(f"Ostrzeżenie: Brak danych dla rozmiaru {size} w tabeli.")
+                continue
+            timings_row = results[size]
+            if not isinstance(timings_row, dict):
+                 print(f"Ostrzeżenie: Nieprawidłowe dane dla rozmiaru {size} (oczekiwano słownika), pomijanie wiersza.")
+                 continue
+
+            print(f"{size:<15} | ", end="")
+            speedup_values = []
+            for faster_key, slower_key, _ in valid_comparisons:
+                time_faster = timings_row.get(faster_key)
+                time_slower = timings_row.get(slower_key)
+                speedup_str = "N/A"
+
+                is_f_valid = isinstance(time_faster, (int, float)) and time_faster > 0 and not math.isinf(time_faster) and not math.isnan(time_faster)
+                is_s_valid = isinstance(time_slower, (int, float)) and time_slower > 0 and not math.isinf(time_slower) and not math.isnan(time_slower)
+
+                if is_f_valid and is_s_valid:
+                    speedup = time_slower / time_faster
+                    speedup_str = f"{speedup:.2f}x"
+                elif not is_f_valid and not is_s_valid: speedup_str = "Oba N/A"
+                elif not is_f_valid: speedup_str = f"{faster_key}-N/A"
+                elif not is_s_valid: speedup_str = f"{slower_key}-N/A"
+                speedup_values.append(f"{speedup_str:^{column_width}}")
+            print(" | ".join(speedup_values))
+        print("-" * len(header))
+    else:
+        print("Brak wystarczających danych dla zdefiniowanych porównań (po odfiltrowaniu gpu_kernel). Tabela przyspieszenia nie zostanie wygenerowana.")
+
+    if not plot_enabled:
+        print("\nGenerowanie wykresów jest wyłączone.")
+        return
+
+    print("\n--- Generowanie Wykresów (bez gpu_kernel) ---")
+
+    os.makedirs(output_dir, exist_ok=True)
+    print(f"Wykresy zostaną zapisane w katalogu: {output_dir}")
+
+    plot_timings = {method: [] for method in methods_to_process}
+    plot_sizes = []
+
+    for size in sizes:
+        if size not in results: continue
+        timings_row = results[size]
+        if not isinstance(timings_row, dict): continue
+
+        has_any_valid_data_no_kernel = any(
+            isinstance(timings_row.get(m), (int, float)) and
+            not math.isinf(timings_row.get(m)) and
+            not math.isnan(timings_row.get(m))
+            for m in methods_to_process
+        )
+
+        if not has_any_valid_data_no_kernel:
+             print(f"Ostrzeżenie: Pomijanie rozmiaru '{size}' w danych do wykresów - brak poprawnych czasów dla metod (bez kernela).")
+             continue
+
+        plot_sizes.append(size)
+
+        for method in methods_to_process:
+             time_val = timings_row.get(method)
+             if isinstance(time_val, (int, float)) and not math.isinf(time_val) and not math.isnan(time_val):
+                 plot_timings[method].append(time_val)
+             else:
+                 plot_timings[method].append(np.nan)
+
+    if not plot_sizes:
+         print("Krytyczny błąd: Brak rozmiarów z poprawnymi danymi do wygenerowania jakichkolwiek wykresów (po odfiltrowaniu gpu_kernel).")
+         return
+
+    index = np.arange(len(plot_sizes))
+
+    print("\n--- Generowanie Wykresu Czasu (Bez gpu_kernel, Skala Log) ---")
+    plt.figure(figsize=(12, 7))
+    methods_plotted_log = 0
+    for method in methods_to_process:
+        if not np.all(np.isnan(plot_timings[method])):
+            plt.plot(index, plot_timings[method], marker='o', linestyle='-', linewidth=1.5, markersize=5, label=method.replace('_', ' ').upper())
+            methods_plotted_log += 1
+        else:
+             print(f"Ostrzeżenie: Brak poprawnych danych dla metody '{method}' na wykresie czasu (log).")
+
+    if methods_plotted_log > 0:
+        plt.xlabel("Rozmiar Problemu (Szerokość Obrazu)")
+        plt.ylabel("Średni Czas Wykonania [ms] (Skala Logarytmiczna)")
+        plt.title(f"Porównanie Wydajności - {algorithm_name.capitalize()}")
+        plt.xticks(index, plot_sizes, rotation=45, ha="right")
+        plt.yscale('log')
+        handles, labels = plt.gca().get_legend_handles_labels()
+        if handles: plt.legend(title="Metoda")
+
+        plt.grid(True, axis='x', which='major', linestyle='--', linewidth=0.5)
+        plt.tight_layout()
+
+        plot_filename_time_log = os.path.join(output_dir, f"{algorithm_name}_performance_no_kernel_log.png")
+        try:
+            plt.savefig(plot_filename_time_log)
+            print(f"Zapisano wykres czasu (bez gpu_kernel, log): {plot_filename_time_log}")
+        except Exception as e:
+            print(f"Błąd podczas zapisywania wykresu {plot_filename_time_log}: {e}")
+    else:
+        print("Pominięto generowanie wykresu czasu (log) - brak danych do narysowania.")
+    plt.close()
+
+    print("\n--- Generowanie Wykresu Przyspieszenia (Bez gpu_kernel, Słupkowy z Wartościami) ---")
+    baseline_key = 'numpy_cpu'
+    if baseline_key not in methods_to_process:
+        print(f"Baseline '{baseline_key}' nie znajduje się wśród przetwarzanych metod (po odfiltrowaniu gpu_kernel). Pomijanie wykresu przyspieszenia.")
+    elif baseline_key not in plot_timings or np.all(np.isnan(plot_timings[baseline_key])):
+            print(f"Baseline '{baseline_key}' zawiera tylko NaN lub brak danych. Pomijanie wykresu przyspieszenia.")
+    else:
+        methods_for_speedup = [m for m in methods_to_process if m != baseline_key]
+
+        if methods_for_speedup:
+            plt.figure(figsize=(12, 7))
+            baseline_times = np.array(plot_timings[baseline_key], dtype=float)
+            baseline_times[np.isnan(baseline_times) | (baseline_times <= 0)] = np.inf
+
+            num_methods_speedup = len(methods_for_speedup)
+
+            total_bar_width_fraction = 0.8
+            bar_width_speedup = total_bar_width_fraction / num_methods_speedup
+
+            label_fontsize = 7 if bar_width_speedup > 0.15 else 6
+
+            index_speedup = np.arange(len(plot_sizes))
+            max_speedup_value = 0
+
+            for i, method in enumerate(methods_for_speedup):
+                method_times = np.array(plot_timings.get(method, [np.nan]*len(plot_sizes)), dtype=float)
+                method_times[np.isnan(method_times) | (method_times <= 0)] = np.inf
+
+                with np.errstate(divide='ignore', invalid='ignore'):
+                    speedup = baseline_times / method_times
+                speedup[~np.isfinite(speedup)] = 0.0
+
+                if np.any(speedup > 0):
+                    bar_positions = index_speedup + (i - num_methods_speedup / 2 + 0.5) * bar_width_speedup
+                    bars = plt.bar(bar_positions, speedup, bar_width_speedup, label=method.replace('_', ' ').upper())
+
+                    for j, bar in enumerate(bars):
+                        s_val = speedup[j]
+                        if s_val > 0:
+                            yval = bar.get_height()
+                            max_speedup_value = max(max_speedup_value, yval)
+                            plt.text(bar.get_x() + bar.get_width()/2.0,
+                                     yval,
+                                     f"{s_val:.2f}x",
+                                     ha='center',
+                                     va='bottom',
+                                     fontsize=label_fontsize,
+                                     rotation=0)
+                else:
+                     print(f"Ostrzeżenie: Brak poprawnych danych przyspieszenia dla metody '{method}' (wzgl. '{baseline_key}').")
+
+            plt.xlabel("Rozmiar Problemu (Szerokość Obrazu)")
+            plt.ylabel(f"Współczynnik Przyspieszenia (względem {baseline_key.upper()})")
+            plt.title(f"Przyspieszenie Obliczeń - {algorithm_name.capitalize()}")
+            plt.xticks(index_speedup, plot_sizes, rotation=45, ha="right")
+            plt.axhline(1, color='grey', linestyle='--', linewidth=0.8, label=f'Baseline {baseline_key.upper()} (1x)')
+
+
+            if max_speedup_value > 0:
+
+                plt.ylim(top=max_speedup_value * 1.20)
+
+            handles, labels = plt.gca().get_legend_handles_labels()
+            if handles:
+                by_label = dict(zip(labels, handles))
+                plt.legend(by_label.values(), by_label.keys(), title="Metoda", fontsize=8)
+
+            plt.grid(axis='y', linestyle='--')
+            plt.tight_layout()
+
+            plot_filename_speedup = os.path.join(output_dir, f"{algorithm_name}_speedup_no_kernel.png")
+            try:
+                plt.savefig(plot_filename_speedup)
+                print(f"Zapisano wykres przyspieszenia (bez gpu_kernel): {plot_filename_speedup}")
+            except Exception as e:
+                print(f"Błąd podczas zapisywania wykresu {plot_filename_speedup}: {e}")
+        else:
+             print(f"Brak innych metod (poza baseline '{baseline_key}') do porównania w wykresie przyspieszenia.")
+        plt.close()
+
+
+    print("\n--- Generowanie Wykresu Czasu (Bez gpu_kernel, Skala Liniowa) ---")
+    plt.figure(figsize=(12, 7))
+    methods_plotted_linear = 0
+    
+    for method in methods_to_process:
+        if not np.all(np.isnan(plot_timings[method])):
+            plt.plot(index, plot_timings[method], marker='o', linestyle='-', linewidth=1.5, markersize=5, label=method.replace('_', ' ').upper())
+            methods_plotted_linear += 1
+        else:
+            print(f"Ostrzeżenie: Brak poprawnych danych dla metody '{method}' na wykresie czasu (lin).")
+
+    if methods_plotted_linear > 0:
+        plt.xlabel("Rozmiar Problemu (Szerokość Obrazu)")
+        plt.ylabel("Średni Czas Wykonania [ms] (Skala Liniowa)")
+
+        plt.title(f"Porównanie Wydajności - {algorithm_name.capitalize()}")
+        plt.xticks(index, plot_sizes, rotation=45, ha="right")
+        plt.yscale('linear')
+        handles, labels = plt.gca().get_legend_handles_labels()
+        if handles: plt.legend(title="Metoda")
+        plt.grid(True, which='major', linestyle='--', linewidth=0.5)
+        plt.tight_layout()
+
+        plot_filename_time_lin = os.path.join(output_dir, f"{algorithm_name}_performance_no_kernel_linear.png")
+        try:
+            plt.savefig(plot_filename_time_lin)
+            print(f"Zapisano wykres czasu (bez gpu_kernel, lin): {plot_filename_time_lin}")
+        except Exception as e:
+            print(f"Błąd podczas zapisywania wykresu {plot_filename_time_lin}: {e}")
+    else:
+        print("Pominięto generowanie wykresu czasu (lin) - brak jakichkolwiek danych do narysowania.")
+    plt.close()
+
+    print("\nGenerowanie wykresów zakończone.")
 
 def plot_results(all_results, output_dir='plots'):
     if not MATPLOTLIB_AVAILABLE:
@@ -325,15 +585,15 @@ if __name__ == "__main__":
                         choices=['mandelbrot'],
                         help="Algorytm do testowania (mandelbrot)")
     parser.add_argument('--sizes_mandelbrot', nargs='+', type=int,
-                        default=[500, 1000, 2000],
+                        default=[500, 1000, 2000, 4000, 6000, 8000],
                         help="Lista szerokości obrazu dla zbioru Mandelbrota.")
     parser.add_argument('--mandel_iter', type=int, default=100,
                         help="Maksymalna liczba iteracji dla zbioru Mandelbrota.")
-    parser.add_argument('--reps', type=int, default=5,
+    parser.add_argument('--reps', type=int, default=10,
                         help="Liczba powtórzeń pomiaru czasu.")
     parser.add_argument('--warmup', type=int, default=1,
                         help="Liczba powtórzeń rozgrzewkowych.")
-    parser.add_argument('--plot', action='store_true',
+    parser.add_argument('--plot', action='store_true', default=True,
                         help="Generuj wykresy wyników (wymaga matplotlib).")
     parser.add_argument('--plot_dir', type=str, default='plots',
                         help="Katalog do zapisania wygenerowanych wykresów.")
@@ -363,12 +623,17 @@ if __name__ == "__main__":
 
     all_results = {}
 
-    if args.algorithm in ['mandelbrot', 'all']:
-        results_mandel = benchmark_mandelbrot(args.sizes_mandelbrot, args.mandel_iter, args.reps, args.warmup)
+    if args.algorithm in ['mandelbrot']:
+        print(f"\nUruchamianie benchmarku dla: {args.algorithm}")
+        results_mandel = benchmark_mandelbrot(
+            args.sizes_mandelbrot,
+            args.mandel_iter,
+            args.reps,
+            args.warmup,
+            gpu_warmup=True
+        )
         all_results['mandelbrot'] = results_mandel
-        print_speedups(results_mandel)
+
+        print_and_plot_detailed_results(results_mandel)
 
     print("\nZakończono benchmark.")
-
-    if args.plot:
-        plot_results(all_results, output_dir=args.plot_dir)
